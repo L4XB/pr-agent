@@ -118,14 +118,19 @@ def _jira_project_keys():
         # The shipped default. An empty container carries no entry to be wrong about.
         return None
     allowed = set()
-    for item in configured:
+    for index, item in enumerate(configured):
         # Only strings are candidates: a TOML/YAML boolean or null in the list must not
         # be stringified into a key-shaped label ("TRUE", "NONE") that then filters.
         key = item.strip() if isinstance(item, str) else item
         if not isinstance(key, str) or not JIRA_PROJECT_KEY_PATTERN.match(key):
+            # The entry is named by position and type, never quoted back. Its content is
+            # configuration this tool does not control: it can be long, hold a secret
+            # pasted into the wrong setting, or carry newlines that would forge log
+            # lines. The position is what an operator needs to find and fix it.
             get_logger().warning(
-                f"Ignoring invalid jira.project_keys entry '{key}'; "
-                "expected a plain upper-case project key like 'PROJ'")
+                f"Ignoring invalid jira.project_keys entry at index {index} "
+                f"(type {type(item).__name__}); expected a plain upper-case project key "
+                "like 'PROJ'")
             continue
         allowed.add(key)
     if not allowed:
@@ -225,11 +230,17 @@ def extract_jira_tickets(text, max_characters=MAX_TICKET_CHARACTERS, max_tickets
     # instead of each costing an authenticated 404. Empty keeps today's behaviour.
     allowed_projects = _jira_project_keys()
     if allowed_projects is not None:
-        skipped = [key for key in keys if key.split("-", 1)[0] not in allowed_projects]
+        # Partitioned in one pass: the candidate list is not capped until lookups begin,
+        # so a PR carrying many distinct key-shaped tokens would otherwise pay a
+        # membership scan of the skipped list for every one of them.
+        kept, skipped = [], []
+        for key in keys:
+            target = kept if key.split("-", 1)[0] in allowed_projects else skipped
+            target.append(key)
         if skipped:
             get_logger().debug(
                 f"Skipping Jira lookup for keys outside jira.project_keys: {', '.join(skipped)}")
-            keys = [key for key in keys if key not in skipped]
+        keys = kept
         if not keys:
             return []
 

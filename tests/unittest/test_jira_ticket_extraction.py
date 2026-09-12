@@ -1,5 +1,6 @@
 import copy
 from unittest.mock import MagicMock, patch
+from string import ascii_uppercase
 from urllib.parse import urlparse
 
 import pytest
@@ -309,7 +310,7 @@ class TestExtractJiraTickets:
         assert result == []
         jira_cls.assert_not_called()
         warning_calls = [str(c) for c in get_logger.return_value.warning.call_args_list]
-        assert any("project_keys" in c and "proj" in c for c in warning_calls)
+        assert any("project_keys" in c and "index 0" in c for c in warning_calls)
         assert any("no valid entry" in c for c in warning_calls)
 
     def test_project_keys_accept_comma_separated_string(self):
@@ -339,7 +340,56 @@ class TestExtractJiraTickets:
             extract_jira_tickets("PROJ-1 SHA-256")
         assert [call.args[0] for call in client.issue.call_args_list] == ["PROJ-1"]
         warning_calls = [str(c) for c in get_logger.return_value.warning.call_args_list]
-        assert any("project_keys" in c and bad_entry in c for c in warning_calls)
+        # Named by position, not quoted back: see
+        # test_a_rejected_entry_is_never_echoed_into_the_log.
+        assert any("project_keys" in c and "index 0" in c for c in warning_calls)
+
+    def test_a_rejected_entry_is_never_echoed_into_the_log(self):
+        """The warning names the entry's position and type, never its content.
+
+        project_keys is operator configuration this tool does not control. A value pasted
+        into the wrong setting can be a credential, and one carrying newlines could forge
+        whole log lines, so the rejected text is not quoted back.
+        """
+        self._configure_jira()
+        secret = "hunter2-SECRET\nWARNING: Jira ticket lookup disabled by operator"
+        _set_project_keys([secret, "PROJ"])
+        client = self._fake_client()
+        with patch("pr_agent.tools.ticket_pr_compliance_check.Jira", return_value=client), \
+                patch("pr_agent.tools.ticket_pr_compliance_check.get_logger") as get_logger:
+            extract_jira_tickets("PROJ-1 SHA-256")
+        # The valid entry still filters, so the rejection is not a silent drop.
+        assert [call.args[0] for call in client.issue.call_args_list] == ["PROJ-1"]
+        warnings = [str(c) for c in get_logger.return_value.warning.call_args_list]
+        assert any("project_keys" in w and "index 0" in w and "type str" in w for w in warnings)
+        for w in warnings:
+            assert "hunter2" not in w
+            assert "SECRET" not in w
+            assert "\n" not in w
+            assert "disabled by operator" not in w
+
+    def test_filtering_keeps_order_and_reports_every_skipped_key(self):
+        """Candidates are partitioned in a single pass over the list.
+
+        The candidate list is not capped until lookups begin, so a PR carrying many
+        distinct key-shaped tokens is the shape this has to stay linear on. What the
+        caller sees must not change: kept keys keep their first-seen order and the debug
+        line still names every skipped key.
+        """
+        self._configure_jira()
+        _set_project_keys(["PROJ"])
+        noise = [f"X{letter}-{index}" for index, letter in enumerate(ascii_uppercase, start=1)]
+        client = self._fake_client()
+        with patch("pr_agent.tools.ticket_pr_compliance_check.Jira", return_value=client), \
+                patch("pr_agent.tools.ticket_pr_compliance_check.get_logger") as get_logger:
+            extract_jira_tickets(" ".join(["PROJ-1", *noise, "PROJ-2"]))
+        assert [call.args[0] for call in client.issue.call_args_list] == ["PROJ-1", "PROJ-2"]
+        debug_calls = [str(c) for c in get_logger.return_value.debug.call_args_list]
+        assert any(
+            "Skipping Jira lookup for keys outside jira.project_keys" in c
+            and ", ".join(noise) in c
+            for c in debug_calls
+        )
 
     @pytest.mark.parametrize("entries", [["PROJ-123"], ["https://acme.atlassian.net/browse/PROJ", "P"], "PROJ-123, x"])
     def test_project_keys_with_no_valid_entry_fail_closed(self, entries):
