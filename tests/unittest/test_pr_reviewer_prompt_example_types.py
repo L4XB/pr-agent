@@ -100,11 +100,20 @@ def test_the_score_example_is_the_int_its_schema_declares():
         )
 
 
+def _taught_fields(value) -> set[str]:
+    """Every key an example teaches, at any depth."""
+    if isinstance(value, dict):
+        return set(value) | {f for v in value.values() for f in _taught_fields(v)}
+    if isinstance(value, list):
+        return {f for v in value for f in _taught_fields(v)}
+    return set()
+
+
 def test_every_field_the_examples_teach_is_one_the_schema_declares():
     """The drift that started #3354 was a field the examples kept after the
-    schema dropped it (`overall_compliance_level`, #3318). That one is already
-    gone; this keeps it gone."""
+    schema dropped it (`overall_compliance_level`, #3318). It sat under
+    `ticket_compliance_check`, so walk nested mappings and lists too."""
     declared = set(_declared_types())
     for example in _review_examples():
-        unknown = sorted(set(example) - declared)
+        unknown = sorted(_taught_fields(example) - declared)
         assert not unknown, f"examples teach fields the schema does not declare: {unknown}"
